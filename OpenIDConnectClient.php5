@@ -124,6 +124,21 @@ class OpenIDConnectClient
     private $certPath;
 
     /**
+	 * @var array (optional) additional parameters to include with token requests
+	 */
+	private $additionalTokenParams;
+
+    /**
+     * @var bool whether tokens signed with an algorithm of 'none' are allowed
+     */
+    private $allowUnsignedTokens = false;
+
+    /**
+     * @var array claims that can be cached from the ID token and returned from requestUserInfo
+     */
+    private $cacheableClaimsFromIdToken = array();
+
+    /**
      * @var string if we aquire an access token it will be stored here
      */
     private $accessToken;
@@ -213,6 +228,9 @@ class OpenIDConnectClient
 
                 // Save the access token
                 $this->accessToken = $token_json->access_token;
+
+                // Cache user info claims from the ID token (optional)
+                $this->cacheUserInfoClaims($claims);
 
                 // Success!
                 return true;
@@ -378,6 +396,10 @@ class OpenIDConnectClient
             'client_secret' => $this->clientSecret
         );
 
+        if (isset($this->additionalTokenParams)) {
+            $token_params = $token_params + $this->additionalTokenParams;
+        }
+
         // Convert token params to string format
         $token_params = http_build_query($token_params, null, '&');
 
@@ -452,6 +474,11 @@ class OpenIDConnectClient
                                                      $this->get_key_for_alg($jwks->keys, 'RSA'),
                                                      $payload, $signature);
             break;
+        case 'none':
+            if ($this->allowUnsignedTokens) {
+                $verified = true;
+                break;
+            }
         default:
             throw new OpenIDConnectClientException('No support for signature type: ' . $header->alg);
         }
@@ -468,6 +495,21 @@ class OpenIDConnectClient
             && (($claims->aud == $this->clientID) || (in_array($this->clientID, $claims->aud)))
             && ($claims->nonce == $_SESSION['openid_connect_nonce']));
 
+    }
+
+    /**
+     * @param object $claims
+     */
+    private function cacheUserInfoClaims($claims) {
+
+        $cache = array();
+        foreach($claims as $key => $value) {
+            if (in_array($key, $this->cacheableClaimsFromIdToken)) {
+                $cache[$key] = $value;
+            }
+        }
+        $this->userInfo = (object) $cache;
+    
     }
 
     /**
@@ -511,21 +553,22 @@ class OpenIDConnectClient
     public function requestUserInfo($attribute) {
 
         // Check to see if the attribute is already in memory
-        if (array_key_exists($attribute, $this->userInfo)) {
+        if (isset($this->userInfo) && array_key_exists($attribute, $this->userInfo)) {
             return $this->userInfo->$attribute;
         }
 
         $user_info_endpoint = $this->getProviderConfigValue("userinfo_endpoint");
+
         $schema = 'openid';
+        $user_info_endpoint .= "?schema=" . $schema; //TODO: This should be externalized as it's non-standard.
 
-        $user_info_endpoint .= "?schema=" . $schema
-            . "&access_token=" . $this->accessToken;
+        $headers = array('Authorization: Bearer ' . $this->accessToken);
 
-        $user_json = json_decode($this->fetchURL($user_info_endpoint));
+        $user_json = json_decode($this->fetchURL($user_info_endpoint, null, $headers));
 
         $this->userInfo = $user_json;
 
-        if (array_key_exists($attribute, $this->userInfo)) {
+        if (isset($this->userInfo) && array_key_exists($attribute, $this->userInfo)) {
             return $this->userInfo->$attribute;
         }
 
@@ -537,14 +580,21 @@ class OpenIDConnectClient
     /**
      * @param $url
      * @param null $post_body string If this is set the post type will be POST
+     * @param $headers array An array of header strings to include in the request
      * @throws OpenIDConnectClientException
      * @return mixed
      */
-    protected function fetchURL($url, $post_body = null) {
+    protected function fetchURL($url, $post_body = null, $headers = null) {
 
 
         // OK cool - then let's create a new cURL resource handle
         $ch = curl_init();
+
+        //curl_setopt($ch, CURLOPT_FAILONERROR, true); // Useful for debugging
+
+        if (!isset($headers)) {
+            $headers = array();
+        }
 
         // Determine whether this is a GET or POST
         if ($post_body != null) {
@@ -559,12 +609,12 @@ class OpenIDConnectClient
                 $content_type = 'application/json';
             }
 
-            curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+            array_push($headers,
                 "Content-Type: {$content_type}",
-                'Content-Length: ' . strlen($post_body)
-            ));
-
+                'Content-Length: ' . strlen($post_body));
         }
+
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
         // Set URL to download
         curl_setopt($ch, CURLOPT_URL, $url);
@@ -665,6 +715,36 @@ class OpenIDConnectClient
      */
     public function setClientID($clientID) {
         $this->clientID = $clientID;
+    }
+
+    /**
+     *
+     * Use this to set additional parameters for token requests
+     *
+     * @param $additionalTokenParams array
+     */
+    public function setAdditionalTokenParameters($additionalTokenParams) {
+        $this->additionalTokenParams = $additionalTokenParams;
+    }
+
+    /**
+     *
+     * Use this to allow the client to accept tokens without a cryptographic signature
+     *
+     * @param $allowUnsignedTokens bool
+     */
+    public function setUnsignedTokensAllowed($allowUnsignedTokens) {
+        $this->allowUnsignedTokens = $allowUnsignedTokens;
+    }
+
+    /**
+     *
+     * Use this to provide the names of ID token parameters that can be cached for subsequent calls to requestUserInfo
+     *
+     * @param $cacheableClaimsFromIdToken array
+     */
+    public function setCacheableClaimsFromIdToken($cacheableClaimsFromIdToken) {
+        $this->cacheableClaimsFromIdToken = $cacheableClaimsFromIdToken;
     }
 
 
